@@ -2,6 +2,56 @@
 
 This repository contains a simple WSGI-based proxy server that handles HTTP Basic Authentication using Keycloak as the identity provider. It leverages Keycloak's access tokens to authenticate requests and forwards authenticated requests to an upstream server. The proxy supports both direct username/password authentication and token-based authentication via introspection.
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant P as Proxy
+    participant K as Keycloak
+    participant U as Upstream
+
+    %% Step 1: Unauthenticated Access
+    C->>P: Request (No Auth)
+    P-->>C: 401 Unauthorized (WWW-Authenticate: Basic)
+
+    %% Step 2: Token Issuance
+    C->>P: Request (Basic Auth: username/password)
+    P->>K: POST /token (credentials)
+    alt Token Issued
+        K-->>P: Access Token
+    else Invalid Credentials
+        K-->>P: Error
+        P-->>C: 401 Unauthorized (Invalid credentials)
+    end
+
+    %% Step 3: Successful Authentication
+    P->>U: Forward Request
+    U-->>P: Response
+    P-->>C: Response + Set-Cookie (token)
+
+    %% Step 4: Token Introspection
+    C->>P: Request (Basic Auth: __token__/token)
+    P->>K: POST /introspect (token)
+    alt Token Active
+        K-->>P: {active: true}
+        P->>U: Forward Request
+        U-->>P: Response
+        P-->>C: Response + Set-Cookie (token)
+    else Token Inactive
+        K-->>P: {active: false}
+        P-->>C: 401 Unauthorized (Invalid token)
+    end
+
+    %% Step 5: Token Validation
+    C->>P: Request (Cookie: token)
+    alt Token Valid (not expired)
+        P->>U: Forward Request
+        U-->>P: Response
+        P-->>C: Response
+    else Token Expired
+        P-->>C: 401 Unauthorized
+    end
+```
+
 ## Features
 
 The proxy server performs authentication as follows:
