@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  proxy:
+    image: keycloak-basic-auth-proxy:0.1.0
+    build:
+      context: ../..
+      dockerfile: ./Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      KEYCLOAK_BASE_URL: "https://keycloak.mydomain.com"
+      KEYCLOAK_REALM: "<keycloak-realm>"
+      KEYCLOAK_CLIENT_ID: "<keycloak-client>"
+      KEYCLOAK_CLIENT_SECRET: "<keycloak-client-secret>"
+      PROXY_UPSTREAM_URL: "http://pypiserver:8080"
+      PROXY_AUTH_COOKIE_NAME: "pypiserver:auth_token"
+    networks:
+      - pypi-network
+    stop_grace_period: 0s
+
+  pypiserver:
+    image: pypiserver/pypiserver:latest
+    command: ["-P", ".", "-a", ".", "/data"]
+    volumes:
+      - pypi-data:/data
+    networks:
+      - pypi-network
+    stop_grace_period: 0s
+
+networks:
+  pypi-network:
+    driver: bridge
+
+volumes:
+  pypi-data:
