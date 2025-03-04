@@ -3,8 +3,9 @@ import json
 import logging
 import os
 import time
-import urllib.parse
-import urllib.request
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 from wsgiref.simple_server import make_server
 
 # Set up logging
@@ -38,38 +39,46 @@ def _get_credentials(environ):
 
 def _issue_token(username, password):
     """Get access token from Keycloak token endpoint."""
-    data = urllib.parse.urlencode(
-        {
-            "grant_type": "password",
-            "client_id": KEYCLOAK_CLIENT_ID,
-            "client_secret": KEYCLOAK_CLIENT_SECRET,
-            "username": username,
-            "password": password,
-        }
-    ).encode("utf-8")
-    req = urllib.request.Request(KEYCLOAK_TOKEN_URL, data=data, method="POST")
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    data = {
+        "grant_type": "password",
+        "client_id": KEYCLOAK_CLIENT_ID,
+        "client_secret": KEYCLOAK_CLIENT_SECRET,
+        "username": username,
+        "password": password,
+    }
     try:
-        with urllib.request.urlopen(req) as resp:
-            response_data = json.loads(resp.read().decode("utf-8"))
+        req = Request(
+            KEYCLOAK_TOKEN_URL,
+            data=urlencode(data).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urlopen(req, timeout=10) as resp:
+            response_data = json.loads(resp.read().decode())
             return response_data.get("access_token")
-    except urllib.error.HTTPError as e:
+    except (HTTPError, URLError) as e:
         logger.error(f"Keycloak request failed: {e}")
         return None
 
 
 def _introspect_token(token):
     """Introspect a Keycloak token and return True if active."""
-    data = urllib.parse.urlencode(
-        {"token": token, "client_id": KEYCLOAK_CLIENT_ID, "client_secret": KEYCLOAK_CLIENT_SECRET}
-    ).encode("utf-8")
-    req = urllib.request.Request(KEYCLOAK_INTROSPECT_URL, data=data, method="POST")
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    data = {
+        "token": token,
+        "client_id": KEYCLOAK_CLIENT_ID,
+        "client_secret": KEYCLOAK_CLIENT_SECRET,
+    }
     try:
-        with urllib.request.urlopen(req) as resp:
-            response_data = json.loads(resp.read().decode("utf-8"))
+        req = Request(
+            KEYCLOAK_INTROSPECT_URL,
+            data=urlencode(data).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urlopen(req, timeout=10) as resp:
+            response_data = json.loads(resp.read().decode())
             return response_data.get("active", False)
-    except urllib.error.HTTPError as e:
+    except (HTTPError, URLError) as e:
         logger.error(f"Token introspection failed: {e}")
         return False
 
@@ -127,29 +136,53 @@ def application(environ, start_response):
 
 
 def proxy_to_upstream(method, path, environ, start_response, token=None):
-    """Forward request to upstream and return response."""
-    upstream_url = f"{PROXY_UPSTREAM_URL}{path}"
+    """Forward request to upstream and return response, including 40x/50x from upstream."""
+    query_string = environ.get("QUERY_STRING", "")
+    upstream_url = f"{PROXY_UPSTREAM_URL}{path}" + (f"?{query_string}" if query_string else "")
     content_length = int(environ.get("CONTENT_LENGTH", 0))
-    post_data = environ["wsgi.input"].read(content_length) if content_length > 0 and method == "POST" else None
-    headers = {
-        k[5:].replace("_", "-"): v for k, v in environ.items() if k.startswith("HTTP_") and k.lower() != "http_host"
-    }
-    req = urllib.request.Request(upstream_url, data=post_data, method=method)
-    for key, value in headers.items():
-        req.add_header(key, value)
+    payload = (
+        environ["wsgi.input"].read(content_length)
+        if content_length > 0 and method in ["POST", "PUT", "PATCH"]
+        else None
+    )
+
+    # Assemble headers to be forwarded
+    headers = {}
+    for key, value in environ.items():
+        # Collect HTTP_* headers
+        if key.startswith("HTTP_"):
+            header_name = key[5:].replace("_", "-").title()
+            headers[header_name] = value
+        # Collect non-HTTP_* standard headers
+        elif key in ["CONTENT_TYPE", "CONTENT_LENGTH"]:
+            header_name = key.replace("_", "-").title()
+            headers[header_name] = value
+    # Add reverse proxy headers
+    headers["X-Forwarded-For"] = environ.get("REMOTE_ADDR", "unknown")
+    headers["X-Forwarded-Host"] = environ.get("HTTP_HOST", "localhost:8000")
+    headers["X-Forwarded-Proto"] = environ.get("wsgi.url_scheme", "http")
+
     try:
-        with urllib.request.urlopen(req) as upstream_resp:
-            upstream_headers = upstream_resp.getheaders()
-            body = upstream_resp.read()
-            response_headers = [(k, v) for k, v in upstream_headers if k.lower() != "content-encoding"]
+        req = Request(upstream_url, data=payload, headers=headers, method=method)
+        with urlopen(req, timeout=10) as resp:
+            response_headers = [(k, v) for k, v in resp.getheaders()]
             if token:
                 expires_in = _get_token_expiry(token)
                 response_headers.append(
                     ("Set-Cookie", f"{PROXY_AUTH_COOKIE_NAME}={token}; Max-Age={expires_in}; Path=/; HttpOnly")
                 )
-            start_response(f"{upstream_resp.status} {upstream_resp.reason}", response_headers)
-            return [body]
-    except urllib.error.URLError:
+            status = f"{resp.getcode()} {resp.reason}"
+            start_response(status, response_headers)
+            return [resp.read()]
+    except HTTPError as e:
+        # Forward upstream HTTP errors (e.g., 40x, 50x) as-is
+        response_headers = [(k, v) for k, v in e.headers.items()]
+        status = f"{e.code} {e.reason}"
+        start_response(status, response_headers)
+        return [e.read()]
+    except URLError as e:
+        # Return 502 only for errors originating in this script (e.g., network failure)
+        logger.error(f"Upstream request failed: {e}")
         start_response("502 Bad Gateway", [("Content-Type", "text/plain")])
         return [b"Bad Gateway"]
 
