@@ -2,10 +2,7 @@ version: "3.8"
 
 services:
   proxy:
-    image: keycloak-basic-auth-proxy:0.1.0
-    build:
-      context: ../..
-      dockerfile: ./Dockerfile
+    image: ghcr.io/khj809/keycloak-basic-auth-proxy:latest
     ports:
       - "8000:8000"
     environment:
