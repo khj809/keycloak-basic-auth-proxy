@@ -81,6 +81,7 @@ The proxy relies on the following environment variables for configuration:
 | `KEYCLOAK_CLIENT_SECRET` | Keycloak client secret for authentication.                                 | Yes      | N/A                 |
 | `PROXY_UPSTREAM_URL`     | URL of the upstream service to forward authenticated requests to.          | Yes      | N/A                 |
 | `PROXY_AUTH_COOKIE_NAME` | Name of the cookie storing the access token.                               | Yes      | N/A                 |
+| `PROXY_AUTHORIZATION`    | How to forward authorization. One of `basic`, `bearer` or `None`           | No       | `None`              |
 | `PROXY_TOKEN_USERNAME`   | Username indicating the password is a token for introspection.             | No       | `__token__`         |
 
 ## How to Use
