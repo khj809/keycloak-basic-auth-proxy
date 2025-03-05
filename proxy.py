@@ -48,10 +48,7 @@ def _issue_token(username, password):
     }
     try:
         resp = requests.post(
-            KEYCLOAK_TOKEN_URL,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=10
+            KEYCLOAK_TOKEN_URL, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=10
         )
         resp.raise_for_status()
         response_data = resp.json()
@@ -73,7 +70,7 @@ def _introspect_token(token):
             KEYCLOAK_INTROSPECT_URL,
             data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=10
+            timeout=10,
         )
         resp.raise_for_status()
         response_data = resp.json()

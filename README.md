@@ -159,7 +159,6 @@ The proxy uses Python's `logging` module with the `INFO` level by default. Logs 
 ## Limitations
 
 - The built-in `wsgiref` server is single-threaded and intended for testing only.
-- Only `GET` and `POST` methods are explicitly handled in the code; other methods are passed through but not specifically tested.
 - Error handling assumes a `502 Bad Gateway` response for upstream failures, which may need customization.
 
 ## Contributing
