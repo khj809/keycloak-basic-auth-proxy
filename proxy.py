@@ -3,10 +3,9 @@ import json
 import logging
 import os
 import time
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 from wsgiref.simple_server import make_server
+
+import requests
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -18,6 +17,7 @@ KEYCLOAK_CLIENT_ID = os.environ.get("KEYCLOAK_CLIENT_ID")
 KEYCLOAK_CLIENT_SECRET = os.environ.get("KEYCLOAK_CLIENT_SECRET")
 PROXY_UPSTREAM_URL = os.environ.get("PROXY_UPSTREAM_URL")
 PROXY_AUTH_COOKIE_NAME = os.environ.get("PROXY_AUTH_COOKIE_NAME")
+PROXY_AUTHORIZATION = os.environ.get("PROXY_AUTHORIZATION", None)
 PROXY_TOKEN_USERNAME = os.environ.get("PROXY_TOKEN_USERNAME", "__token__")
 
 KEYCLOAK_TOKEN_URL = f"{KEYCLOAK_BASE_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/token"
@@ -47,16 +47,13 @@ def _issue_token(username, password):
         "password": password,
     }
     try:
-        req = Request(
-            KEYCLOAK_TOKEN_URL,
-            data=urlencode(data).encode(),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
+        resp = requests.post(
+            KEYCLOAK_TOKEN_URL, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=10
         )
-        with urlopen(req, timeout=10) as resp:
-            response_data = json.loads(resp.read().decode())
-            return response_data.get("access_token")
-    except (HTTPError, URLError) as e:
+        resp.raise_for_status()
+        response_data = resp.json()
+        return response_data.get("access_token")
+    except requests.RequestException as e:
         logger.error(f"Keycloak request failed: {e}")
         return None
 
@@ -69,16 +66,16 @@ def _introspect_token(token):
         "client_secret": KEYCLOAK_CLIENT_SECRET,
     }
     try:
-        req = Request(
+        resp = requests.post(
             KEYCLOAK_INTROSPECT_URL,
-            data=urlencode(data).encode(),
+            data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
+            timeout=10,
         )
-        with urlopen(req, timeout=10) as resp:
-            response_data = json.loads(resp.read().decode())
-            return response_data.get("active", False)
-    except (HTTPError, URLError) as e:
+        resp.raise_for_status()
+        response_data = resp.json()
+        return response_data.get("active", False)
+    except requests.RequestException as e:
         logger.error(f"Token introspection failed: {e}")
         return False
 
@@ -94,16 +91,15 @@ def _get_token_expiry(token):
         return 3600
 
 
-def _validate_cookie(environ):
-    """Validate Keycloak JWT token from cookie by checking expiration."""
+def _get_cookie_token(environ):
+    """Extract Keycloak JWT token from cookie."""
     cookie = environ.get("HTTP_COOKIE", "")
     if PROXY_AUTH_COOKIE_NAME not in cookie:
-        return False
+        return None
     try:
-        token = cookie.split(PROXY_AUTH_COOKIE_NAME + "=")[1].split(";")[0]
-        return _get_token_expiry(token) > 0
+        return cookie.split(PROXY_AUTH_COOKIE_NAME + "=")[1].split(";")[0]
     except IndexError:
-        return False
+        return None
 
 
 def application(environ, start_response):
@@ -112,8 +108,9 @@ def application(environ, start_response):
     path = environ["PATH_INFO"]
 
     # Check cookie
-    if _validate_cookie(environ):
-        return proxy_to_upstream(method, path, environ, start_response)
+    token = _get_cookie_token(environ)
+    if token is not None and _get_token_expiry(token) > 0:
+        return proxy_to_upstream(method, path, environ, start_response, token)
 
     # Check credentials
     username, password = _get_credentials(environ)
@@ -135,7 +132,7 @@ def application(environ, start_response):
             return send_unauthorized(start_response, "Invalid credentials")
 
 
-def proxy_to_upstream(method, path, environ, start_response, token=None):
+def proxy_to_upstream(method, path, environ, start_response, token):
     """Forward request to upstream and return response, including 40x/50x from upstream."""
     query_string = environ.get("QUERY_STRING", "")
     upstream_url = f"{PROXY_UPSTREAM_URL}{path}" + (f"?{query_string}" if query_string else "")
@@ -149,6 +146,9 @@ def proxy_to_upstream(method, path, environ, start_response, token=None):
     # Assemble headers to be forwarded
     headers = {}
     for key, value in environ.items():
+        # Exclude Authorization header
+        if key == "HTTP_AUTHORIZATION":
+            continue
         # Collect HTTP_* headers
         if key.startswith("HTTP_"):
             header_name = key[5:].replace("_", "-").title()
@@ -162,26 +162,38 @@ def proxy_to_upstream(method, path, environ, start_response, token=None):
     headers["X-Forwarded-Host"] = environ.get("HTTP_HOST", "localhost:8000")
     headers["X-Forwarded-Proto"] = environ.get("wsgi.url_scheme", "http")
 
+    proxy_authorization = PROXY_AUTHORIZATION.lower()
+    if proxy_authorization == "basic":
+        # Forward basic auth as-is
+        headers["Authorization"] = environ["HTTP_AUTHORIZATION"]
+    elif proxy_authorization == "bearer":
+        # Use the toekn as Bearer token
+        headers["Authorization"] = f"Bearer {token}"
+    else:
+        # Do not forward authorization
+        pass
+
     try:
-        req = Request(upstream_url, data=payload, headers=headers, method=method)
-        with urlopen(req, timeout=10) as resp:
-            response_headers = [(k, v) for k, v in resp.getheaders()]
-            if token:
-                expires_in = _get_token_expiry(token)
-                response_headers.append(
-                    ("Set-Cookie", f"{PROXY_AUTH_COOKIE_NAME}={token}; Max-Age={expires_in}; Path=/; HttpOnly")
-                )
-            status = f"{resp.getcode()} {resp.reason}"
-            start_response(status, response_headers)
-            return [resp.read()]
-    except HTTPError as e:
-        # Forward upstream HTTP errors (e.g., 40x, 50x) as-is
-        response_headers = [(k, v) for k, v in e.headers.items()]
-        status = f"{e.code} {e.reason}"
+        resp = requests.request(
+            method=method,
+            url=upstream_url,
+            headers=headers,
+            data=payload,
+            timeout=10,
+            allow_redirects=False,
+        )
+        response_headers = [(k, v) for k, v in resp.headers.items()]
+        status = f"{resp.status_code} {resp.reason}"
+        body = resp.content
+        if token:
+            expires_in = _get_token_expiry(token)
+            response_headers.append(
+                ("Set-Cookie", f"{PROXY_AUTH_COOKIE_NAME}={token}; Max-Age={expires_in}; Path=/; HttpOnly")
+            )
         start_response(status, response_headers)
-        return [e.read()]
-    except URLError as e:
-        # Return 502 only for errors originating in this script (e.g., network failure)
+        return [body]
+    except requests.RequestException as e:
+        # network-level failure
         logger.error(f"Upstream request failed: {e}")
         start_response("502 Bad Gateway", [("Content-Type", "text/plain")])
         return [b"Bad Gateway"]
