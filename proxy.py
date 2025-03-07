@@ -158,9 +158,9 @@ def proxy_to_upstream(method, path, environ, start_response, token):
             header_name = key.replace("_", "-").title()
             headers[header_name] = value
     # Add reverse proxy headers
-    headers["X-Forwarded-For"] = environ.get("REMOTE_ADDR", "unknown")
-    headers["X-Forwarded-Host"] = environ.get("HTTP_HOST", "localhost:8000")
-    headers["X-Forwarded-Proto"] = environ.get("wsgi.url_scheme", "http")
+    headers["X-Forwarded-For"] = environ.get("HTTP_X_FORWARDED_FOR", environ.get("REMOTE_ADDR", "unknown"))
+    headers["X-Forwarded-Host"] = environ.get("HTTP_X_FORWARDED_HOST", environ.get("HTTP_HOST", "localhost:8000"))
+    headers["X-Forwarded-Proto"] = environ.get("HTTP_X_FORWARDED_PROTO", environ.get("wsgi.url_scheme", "http"))
 
     proxy_authorization = PROXY_AUTHORIZATION.lower()
     if proxy_authorization == "basic":
