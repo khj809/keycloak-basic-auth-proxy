@@ -104,13 +104,11 @@ def _get_cookie_token(environ):
 
 def application(environ, start_response):
     """WSGI application to handle requests."""
-    method = environ["REQUEST_METHOD"]
-    path = environ["PATH_INFO"]
 
     # Check cookie
     token = _get_cookie_token(environ)
     if token is not None and _get_token_expiry(token) > 0:
-        return proxy_to_upstream(method, path, environ, start_response, token)
+        return proxy_to_upstream(environ, start_response, token)
 
     # Check credentials
     username, password = _get_credentials(environ)
@@ -120,20 +118,22 @@ def application(environ, start_response):
     # Token introspection if username is PROXY_TOKEN_USERNAME
     if username == PROXY_TOKEN_USERNAME:
         if _introspect_token(password):
-            return proxy_to_upstream(method, path, environ, start_response, password)
+            return proxy_to_upstream(environ, start_response, password, set_cookie=True)
         else:
             return send_unauthorized(start_response, "Invalid or inactive token")
     # Validate credentials via Keycloak for other usernames
     else:
         token = _issue_token(username, password)
         if token:
-            return proxy_to_upstream(method, path, environ, start_response, token)
+            return proxy_to_upstream(environ, start_response, token, set_cookie=True)
         else:
             return send_unauthorized(start_response, "Invalid credentials")
 
 
-def proxy_to_upstream(method, path, environ, start_response, token):
+def proxy_to_upstream(environ, start_response, token, set_cookie = False):
     """Forward request to upstream and return response, including 40x/50x from upstream."""
+    method = environ["REQUEST_METHOD"]
+    path = environ["PATH_INFO"]
     query_string = environ.get("QUERY_STRING", "")
     upstream_url = f"{PROXY_UPSTREAM_URL}{path}" + (f"?{query_string}" if query_string else "")
     content_length = int(environ.get("CONTENT_LENGTH", 0))
@@ -185,7 +185,7 @@ def proxy_to_upstream(method, path, environ, start_response, token):
         response_headers = [(k, v) for k, v in resp.headers.items()]
         status = f"{resp.status_code} {resp.reason}"
         body = resp.content
-        if token:
+        if set_cookie:
             expires_in = _get_token_expiry(token)
             response_headers.append(
                 ("Set-Cookie", f"{PROXY_AUTH_COOKIE_NAME}={token}; Max-Age={expires_in}; Path=/; HttpOnly")
