@@ -6,7 +6,9 @@ LABEL org.opencontainers.image.description="Keycloak Basic Auth Proxy"
 LABEL org.opencontainers.image.licenses=MIT
 
 WORKDIR /app
-RUN pip install --no-cache-dir requests gunicorn
+COPY --from=ghcr.io/astral-sh/uv:0.6.6 /uv /bin/uv
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --locked --no-install-project --group cache
 ADD ./proxy.py ./
 
-CMD ["gunicorn", "--workers", "4", "--bind", "0.0.0.0:8000", "proxy:application"]
+CMD ["uv", "run", "--no-sync", "gunicorn", "--workers", "4", "--bind", "0.0.0.0:8000", "proxy:application"]
