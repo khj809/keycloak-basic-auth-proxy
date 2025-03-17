@@ -1,6 +1,11 @@
 version: "3.8"
 
 services:
+  redis:
+    image: redis:latest
+    networks:
+      - pypi-network
+
   proxy:
     image: ghcr.io/khj809/keycloak-basic-auth-proxy:latest
     ports:
@@ -12,6 +17,10 @@ services:
       KEYCLOAK_CLIENT_SECRET: "<keycloak-client-secret>"
       PROXY_UPSTREAM_URL: "http://pypiserver:8080"
       PROXY_AUTH_COOKIE_NAME: "pypiserver:auth_token"
+      PROXY_TOKEN_CACHE_ENABLED: "True"
+      PROXY_TOKEN_CACHE_URL: "redis:6379/0"
+    depends_on:
+      - redis
     networks:
       - pypi-network
     stop_grace_period: 0s
