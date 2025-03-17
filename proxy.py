@@ -54,7 +54,9 @@ def _issue_token(username, password):
         response_data = resp.json()
         return response_data.get("access_token")
     except requests.RequestException as e:
-        logger.error(f"Keycloak request failed: {e}")
+        # 401 is authentication failed, which does not need to be logged
+        if e.response.status_code != 401:
+            logger.error(f"Keycloak request failed: {e}\nContent: {e.response.content}")
         return None
 
 
