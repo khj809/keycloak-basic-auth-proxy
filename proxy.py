@@ -19,9 +19,16 @@ PROXY_UPSTREAM_URL = os.environ.get("PROXY_UPSTREAM_URL")
 PROXY_AUTH_COOKIE_NAME = os.environ.get("PROXY_AUTH_COOKIE_NAME")
 PROXY_AUTHORIZATION = os.environ.get("PROXY_AUTHORIZATION", None)
 PROXY_TOKEN_USERNAME = os.environ.get("PROXY_TOKEN_USERNAME", "__token__")
+PROXY_TOKEN_CACHE_ENABLED = bool(os.environ.get("PROXY_TOKEN_CACHE_ENABLED", "False"))
+PROXY_TOKEN_CACHE_URL = os.environ.get("PROXY_TOKEN_CACHE_URL", "localhost:6379/0")
 
 KEYCLOAK_TOKEN_URL = f"{KEYCLOAK_BASE_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/token"
 KEYCLOAK_INTROSPECT_URL = f"{KEYCLOAK_TOKEN_URL}/introspect"
+
+if PROXY_TOKEN_CACHE_ENABLED:
+    from redis import Redis
+
+    r = Redis.from_url(f"redis://{PROXY_TOKEN_CACHE_URL}", decode_responses=True)
 
 
 def _get_credentials(environ):
@@ -39,6 +46,13 @@ def _get_credentials(environ):
 
 def _issue_token(username, password):
     """Get access token from Keycloak token endpoint."""
+    if PROXY_TOKEN_CACHE_ENABLED:
+        cache_key = f"{username}:{password}"
+        cached_token = r.get(cache_key)
+        if cached_token is not None:
+            if _get_token_expiry(cached_token) > 0:
+                return cached_token
+
     data = {
         "grant_type": "password",
         "client_id": KEYCLOAK_CLIENT_ID,
@@ -52,7 +66,11 @@ def _issue_token(username, password):
         )
         resp.raise_for_status()
         response_data = resp.json()
-        return response_data.get("access_token")
+        access_token = response_data.get("access_token")
+        if PROXY_TOKEN_CACHE_ENABLED:
+            expires_in: int = response_data.get("expires_in")
+            r.setex(cache_key, expires_in, access_token)
+        return access_token
     except requests.RequestException as e:
         # 401 is authentication failed, which does not need to be logged
         if e.response.status_code != 401:
@@ -132,7 +150,7 @@ def application(environ, start_response):
             return send_unauthorized(start_response, "Invalid credentials")
 
 
-def proxy_to_upstream(environ, start_response, token, set_cookie = False):
+def proxy_to_upstream(environ, start_response, token, set_cookie=False):
     """Forward request to upstream and return response, including 40x/50x from upstream."""
     method = environ["REQUEST_METHOD"]
     path = environ["PATH_INFO"]
